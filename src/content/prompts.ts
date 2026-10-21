@@ -1,8 +1,9 @@
 /**
  * Prompts and reply parsing.
  *
- * The model is forced into a labelled four-line format so the app can render
- * characters, pinyin and English as separate layers and grade against the pinyin.
+ * The model is forced into a labelled line format (ZH / PY / EN / NOTE, plus
+ * ACTIVITY and SUGGEST on spoken turns) so the app can render characters,
+ * pinyin and English as separate layers and grade against the pinyin.
  * Parsing is deliberately forgiving: small models drift, and a missing label
  * should degrade to "Chinese only" rather than showing the learner raw markup.
  */
@@ -44,30 +45,35 @@ Hard rules:
 `.trim();
 
 /**
- * Spoken turns need a different shape: the ZH line is read aloud by the phone,
- * and a fifth line tells the app what to offer as practice next.
+ * Spoken turns need a different shape: English leads because the learner is a
+ * beginner and cannot follow spoken Chinese yet, the ZH line is read aloud after
+ * it, and two extra lines say what the two of you will do together next.
  */
 const SPOKEN_RULES = `
-Always reply in exactly this five-line format, in this order, with nothing before or after:
+The learner is a beginner: they cannot follow spoken Chinese yet. English leads every turn.
 
-ZH: <your Chinese, characters only — this line is spoken aloud exactly as written>
+Always reply in exactly this six-line format, in this order, with nothing before or after:
+
+EN: <English, spoken aloud first. One or two friendly sentences: react to what the learner said, answer them, then invite them into the activity.>
+ZH: <the Chinese you are teaching, characters only — this line is spoken aloud right after the English>
 PY: <pinyin with tone numbers, one syllable per Chinese character, space separated, e.g. ni3 hao3>
-EN: <natural English translation of the ZH line>
 NOTE: <one short tip or answer in English, one sentence>
+ACTIVITY: <what the two of you will do together next, three to eight English words starting with a verb — e.g. Repeat these after me, or Order a coffee from me>
 SUGGEST: <the English topic to practise next, three or four words, or - if nothing fits>
 
 Hard rules:
+- EN comes first and carries the meaning. Never answer in Chinese only.
 - ZH is read aloud by a machine, so use plain characters: no pinyin, no brackets, no emoji, no markdown.
 - One or two short sentences, then a question. This is a conversation, not a lecture.
 - PY must have exactly one syllable per character in ZH.
 - Never merge lines. Never add other labels.
 - Stay at HSK 1-2 level.
-- SUGGEST names what the learner just showed interest in — a topic, never a sentence.
+- ACTIVITY is always something we do together out loud. SUGGEST names a topic, never a sentence.
 `.trim();
 
 export function systemPrompt(mode: TutorMode, scenario?: Scenario): string {
   const persona =
-    "You are 小文, a patient Mandarin tutor for an English-speaking beginner. You correct gently and never lecture.";
+    "You are 小文, a patient bilingual Mandarin tutor for an English-speaking beginner: you are fluent in English and in Mandarin, and you teach in English. You correct gently and never lecture.";
 
   if (mode === 'scenario' && scenario) {
     return `${persona}
@@ -89,14 +95,15 @@ ${FORMAT_RULES}`;
   if (mode === 'live') {
     return `${persona}
 
-You are on a live voice call with the learner. Your ZH line is spoken aloud, so it must sound like natural speech and stay short.
+You are on a live voice call. Everything you write is spoken aloud, English first and then the Chinese, so the learner always hears the meaning before the sounds.
 
 Your job, in order of priority:
-1. If the learner asks how to say something, what a word means, or how Chinese works, answer the question plainly in the EN line and give the Chinese in the ZH line.
-2. If the learner says what they want to learn or do (food, travel, work, meeting people…), teach them the two or three sentences they need for it, and name that topic in SUGGEST.
-3. Otherwise keep a warm, simple conversation going about everyday things.
+1. Answer whatever the learner asked — plainly, in English, in the EN line. The Chinese for it goes in ZH.
+2. Never reply in Chinese only. If a thought is hard to express in Chinese, say it in English anyway.
+3. Every turn, offer something for the two of us to do together: a short repeat-after-me round, a mini-roleplay where you play the other person (waiter, shopkeeper, taxi driver), or a listening round. Name it, in the imperative, in ACTIVITY.
+4. If the learner says what they want to learn or do (food, travel, work, meeting people…), teach the two or three sentences they need for it — one at a time — and name that topic in SUGGEST.
 
-Be encouraging and human. React to what the learner actually said before teaching. If they say something wrong, say the corrected version in ZH and explain briefly in NOTE.
+Be encouraging and human, like a tutor sitting next to them. React to what they actually said before teaching. If they say something wrong, put the corrected version in ZH and explain the fix briefly in NOTE.
 
 ${SPOKEN_RULES}`;
   }
@@ -122,6 +129,10 @@ const LABEL_MAP: Record<string, keyof TutorReply> = {
   notes: 'note',
   tip: 'note',
   '提示': 'note',
+  activity: 'activity',
+  activities: 'activity',
+  act: 'activity',
+  '活动': 'activity',
   suggest: 'suggest',
   suggestion: 'suggest',
   practice: 'suggest',
@@ -130,10 +141,10 @@ const LABEL_MAP: Record<string, keyof TutorReply> = {
   '建议': 'suggest',
 };
 
-/** Pulls ZH / PY / EN / NOTE / SUGGEST out of a model reply, tolerating markdown and Chinese labels. */
+/** Pulls ZH / PY / EN / NOTE / ACTIVITY / SUGGEST out of a model reply, tolerating markdown and Chinese labels. */
 export function parseTutorReply(raw: string): TutorReply {
-  const reply: TutorReply = { zh: '', pinyin: '', en: '', note: '', suggest: '', raw };
-  const lineRe = /^\s*(?:[-*#>\s]|\*\*)*\s*(ZH|PY|EN|NOTE|NOTES|TIP|SUGGEST|SUGGESTION|PRACTICE|PRACTISE|TOPIC|中文|拼音|英文|提示|建议)\s*(?:\*\*)?\s*[:：]\s*(.*)$/i;
+  const reply: TutorReply = { zh: '', pinyin: '', en: '', note: '', activity: '', suggest: '', raw };
+  const lineRe = /^\s*(?:[-*#>\s]|\*\*)*\s*(ZH|PY|EN|NOTE|NOTES|TIP|ACTIVITY|ACTIVITIES|SUGGEST|SUGGESTION|PRACTICE|PRACTISE|TOPIC|中文|拼音|英文|提示|活动|建议)\s*(?:\*\*)?\s*[:：]\s*(.*)$/i;
 
   const lines = raw.split(/\r?\n/);
   let current: keyof TutorReply | null = null;
@@ -156,7 +167,7 @@ export function parseTutorReply(raw: string): TutorReply {
   // Model ignored the format: show what it wrote rather than an empty card.
   if (!reply.zh) {
     reply.zh = raw
-      .replace(/^\s*(ZH|PY|EN|NOTE|SUGGEST|SUGGESTION|PRACTICE|TOPIC)\s*[:：].*$/gim, '')
+      .replace(/^\s*(ZH|PY|EN|NOTE|ACTIVITY|SUGGEST|SUGGESTION|PRACTICE|TOPIC)\s*[:：].*$/gim, '')
       .trim() || raw.trim();
   }
   // Some models separate the pinyin with hyphens or slashes by syllable.

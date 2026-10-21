@@ -3,23 +3,30 @@
  *
  * Each turn is listen → transcribe → reply → speak, and the microphone is only
  * open while listening, so the tutor's own voice can never feed back into the
- * next turn. The tutor also names the topic it wants the learner to practise
- * next, which this view turns into a real lesson — or, when no lesson covers it,
- * into lines written on the spot and graded in Shadowing.
+ * next turn. 小文 leads in English and then gives the Chinese, because the
+ * learner cannot follow spoken Chinese yet.
+ *
+ * The tutor also names the topic and the activity it wants to do next, which
+ * this view turns into a repeat-after-me drill graded exactly like Shadowing —
+ * same word matching, same tone analysis, same history.
  */
-import { h, button, frag } from '../dom';
-import { notice, phraseCard } from '../components';
+import { h, button, card, frag } from '../dom';
+import { meter, notice, phraseCard, pitchCanvas, scoreRing } from '../components';
 import { parseTutorReply } from '../../content/prompts';
 import { LESSONS, matchLessons } from '../../content/lessons';
 import { transcribe, transcribeWithWebSpeech, webSpeechSupported } from '../../ai/asr';
-import { MicRecorder } from '../../ai/recorder';
+import { MicRecorder, type Recording } from '../../ai/recorder';
 import { generatePhrases, streamReply } from '../../ai/tutor';
 import { tts } from '../../ai/tts';
+import { scoreAttempt, type ShadowResult } from '../../nlp/score';
 import { store } from '../../store';
 import { app, ensureSpeech, loadModel, subscribe } from '../state';
 import type { ChatMessage, Lesson, Phrase, TutorReply } from '../../types';
 
 type Phase = 'off' | 'listening' | 'thinking' | 'speaking';
+
+/** Focused repeat-after-me activity, run inside Live rather than handing off. */
+type DrillPhase = 'idle' | 'modelling' | 'listening' | 'grading';
 
 interface Line {
   kind: 'learner' | 'tutor';
@@ -29,17 +36,31 @@ interface Line {
 
 interface Suggestion {
   topic: string;
+  /** What 小文 wants the two of you to do together, in its own words. */
+  activity: string;
   lesson: Lesson | null;
   phrases: Phrase[] | null;
   busy: boolean;
   failed: boolean;
 }
 
+interface Drill {
+  phrases: Phrase[];
+  index: number;
+  result: ShadowResult | null;
+  /** The number shown on the ring — tones alone when word matching was skipped. */
+  shown: number;
+  skippedWords: boolean;
+  phase: DrillPhase;
+  status: string;
+}
+
 const OPENING: TutorReply = {
   zh: '你好，我是小文。你想练习什么？',
   pinyin: 'ni3 hao3 wo3 shi4 xiao3 wen2 ni3 xiang3 lian4 xi2 shen2 me5',
-  en: "Hello, I'm Xiaowen. What would you like to practise?",
-  note: 'Answer in Chinese or English — I understand both.',
+  en: "Hi, I'm Xiaowen, your Chinese tutor. I'll say everything in English first, then in Chinese. What would you like to work on today?",
+  note: 'Answer in English or Chinese — I understand both.',
+  activity: 'Tell me what to teach you',
   raw: '',
 };
 
@@ -52,9 +73,12 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
   let history: ChatMessage[] = [];
   let streaming: string | null = null;
   let suggestion: Suggestion | null = null;
+  let drill: Drill | null = null;
   let lastTopic = '';
   /** Bumped on every end/interrupt so in-flight turns know they are stale. */
   let session = 0;
+  /** Same idea for the drill, which runs while the conversation is stopped. */
+  let drillSession = 0;
 
   const recorder = new MicRecorder();
   const webSpeech = () => app.settings.useWebSpeechSTT && webSpeechSupported();
@@ -80,7 +104,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       h('h1', { class: 'view__title', text: 'Live' }),
       h('p', {
         class: 'view__sub',
-        text: 'A hands-free conversation with 小文. It stops listening when you stop talking, answers out loud, and lines up what to practise next.',
+        text: 'A hands-free conversation with 小文, your bilingual tutor. It answers in English first and then in Chinese, suggests what to do together, and scores your attempts the way Shadowing does.',
       }),
       noticesEl,
       h('div', { class: 'live' },
@@ -130,18 +154,26 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     return out;
   }
 
+  /** English first, then the Chinese — so a beginner hears the meaning first. */
+  async function say(reply: TutorReply): Promise<void> {
+    const en = reply.en.trim();
+    const zh = reply.zh.trim();
+    if (en) await tts.speak(en, app.settings.speechRate, { lang: 'en' });
+    if (zh) await tts.speak(zh, app.settings.speechRate, { lang: 'zh' });
+  }
+
   function bubbleFor(reply: TutorReply, showSpeak: boolean): HTMLElement {
     const node = h('div', { class: 'bubble bubble--assistant' });
     node.append(
       h('div', { class: 'bubble__body' },
+        app.settings.showEnglish && reply.en ? h('div', { class: 'bubble__en bubble__en--lead', text: reply.en }) : null,
         h('div', { class: 'bubble__zh', text: reply.zh }),
         app.settings.showPinyin && reply.pinyin ? h('div', { class: 'bubble__py', text: reply.pinyin }) : null,
-        app.settings.showEnglish && reply.en ? h('div', { class: 'bubble__en', text: reply.en }) : null,
         reply.note ? h('div', { class: 'bubble__note', text: reply.note }) : null,
       ),
     );
     if (showSpeak && reply.zh) {
-      node.append(button('🔊', 'bubble__speak', () => void tts.speak(reply.zh, app.settings.speechRate)));
+      node.append(button('🔊', 'bubble__speak', () => void say(reply)));
     }
     return node;
   }
@@ -164,11 +196,12 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       }
     }
     if (streaming !== null) {
-      const raw = streaming;
+      const partial = parseTutorReply(streaming);
       transcriptEl.append(
         h('div', { class: 'bubble bubble--assistant bubble--streaming' },
           h('div', { class: 'bubble__body' },
-            h('div', { class: 'bubble__zh', text: parseTutorReply(raw).zh || '…' }),
+            h('div', { class: 'bubble__en bubble__en--lead', text: partial.en || '…' }),
+            partial.zh ? h('div', { class: 'bubble__zh', text: partial.zh }) : null,
           ),
         ),
       );
@@ -182,11 +215,13 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
   function practiceCard(): HTMLElement | null {
     if (!suggestion) return null;
     const s = suggestion;
+    const phrases = drillPhrases();
 
     const rows: (HTMLElement | null)[] = [
-      h('h2', { text: 'Practise next' }),
+      h('h2', { text: 'Practise together' }),
       h('p', { class: 'muted small', text: `小文 heard you are interested in: ${s.topic}` }),
     ];
+    if (s.activity) rows.push(h('p', { class: 'muted small', text: `小文 suggests: ${s.activity}` }));
 
     if (s.lesson) {
       rows.push(
@@ -195,10 +230,6 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
           showEnglish: app.settings.showEnglish,
           onSpeak: () => void tts.speak(s.lesson!.phrases[0].hanzi, app.settings.speechRate),
         }),
-        h('div', { class: 'row' },
-          button(`Practise ${s.lesson.title}`, 'btn', () => openLesson(s.lesson!.id)),
-        ),
-        h('p', { class: 'muted small', text: 'Opens Shadowing with that lesson, where your attempt gets scored.' }),
       );
     } else if (s.phrases) {
       rows.push(
@@ -224,9 +255,228 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       );
     }
 
+    if (phrases && phrases.length > 0) {
+      rows.push(
+        h('div', { class: 'row' },
+          button('🎯 Do it together', 'btn btn--mic', () => startDrill()),
+        ),
+        h('p', {
+          class: 'muted small',
+          text: '小文 says each line in English and then Chinese, listens to you repeat it, and scores your words and tones — same grading as Shadowing.',
+        }),
+      );
+    }
+
     if (s.failed) rows.push(notice('Could not write those lines. Try again in a moment.', 'warn'));
 
     return h('div', { class: 'card' }, ...rows);
+  }
+
+  /** The lines a drill would use: the matched lesson first, else the written ones. */
+  function drillPhrases(): Phrase[] | null {
+    if (!suggestion) return null;
+    if (suggestion.lesson) return suggestion.lesson.phrases.slice(0, 4);
+    if (suggestion.phrases && suggestion.phrases.length > 0) return suggestion.phrases;
+    return null;
+  }
+
+  function startDrill(): void {
+    const phrases = drillPhrases();
+    if (!phrases || phrases.length === 0) return;
+    drillSession += 1;
+    drill = { phrases, index: 0, result: null, shown: 0, skippedWords: false, phase: 'idle', status: '' };
+    tts.cancel();
+    paint();
+  }
+
+  function closeDrill(): void {
+    drillSession += 1;
+    drill = null;
+    tts.cancel();
+    paint();
+  }
+
+  function stepDrill(delta: number): void {
+    const d = drill;
+    if (!d) return;
+    drillSession += 1;
+    d.index = (d.index + delta + d.phrases.length) % d.phrases.length;
+    d.result = null;
+    d.shown = 0;
+    d.skippedWords = false;
+    d.status = '';
+    paint();
+  }
+
+  /** 小文 models the line the way it speaks everything else: English, then Chinese. */
+  async function modelPhrase(phrase: Phrase): Promise<void> {
+    tts.unlock();
+    if (phrase.en) await tts.speak(phrase.en, app.settings.speechRate, { lang: 'en' });
+    await tts.speak(phrase.hanzi, app.settings.speechRate, { lang: 'zh' });
+  }
+
+  /**
+   * One turn of the activity: model it, hear it back hands-free, then grade it
+   * with the same word-and-tone analysis Shadowing uses.
+   */
+  async function drillTurn(): Promise<void> {
+    const d = drill;
+    if (!d || d.phase !== 'idle') return;
+    const phrase = d.phrases[d.index];
+    const mine = ++drillSession;
+
+    d.result = null;
+    d.shown = 0;
+    d.status = '';
+
+    d.phase = 'modelling';
+    d.status = 'Listen — English first, then the Chinese.';
+    paint();
+    await modelPhrase(phrase);
+    if (mine !== drillSession) return;
+
+    d.phase = 'listening';
+    d.status = 'Getting the microphone ready…';
+    paint();
+    const speechReady = await ensureSpeech();
+    if (mine !== drillSession) return;
+
+    d.status = "Your turn — say it back. I'll stop listening when you stop.";
+    paint();
+
+    let clip: Recording | null = null;
+    try {
+      clip = await recorder.listen({ onLevel: setLevel });
+    } catch (err) {
+      d.phase = 'idle';
+      d.status = (err as Error).message;
+      paint();
+      return;
+    }
+    if (mine !== drillSession) return;
+    if (!clip) {
+      d.phase = 'idle';
+      d.status = "I didn't catch that — tap Say it back and try again.";
+      paint();
+      return;
+    }
+
+    d.phase = 'grading';
+    d.status = 'Marking your words and tones on this phone…';
+    paint();
+
+    let transcript = '';
+    d.skippedWords = !speechReady;
+    if (speechReady) {
+      try {
+        transcript = await transcribe(clip.audio);
+      } catch {
+        // Noise or an empty clip: the tone grader can still work on the audio.
+        d.skippedWords = true;
+      }
+    }
+    if (mine !== drillSession) return;
+
+    const result = scoreAttempt(phrase, transcript, clip.audio, clip.sampleRate);
+    const pitch = result.pitch;
+    const tones = pitch?.tones.some((t) => t.expected !== 5) ?? false;
+    // Word matching needs the recogniser; without it the tones alone are the fair grade.
+    const shown = d.skippedWords && pitch && tones ? pitch.averageScore : result.overall;
+
+    d.result = result;
+    d.shown = shown;
+    d.phase = 'idle';
+    d.status = '';
+    store.recordAttempt(phrase.id, shown);
+    paint();
+  }
+
+  function drillResults(d: Drill): HTMLElement | null {
+    if (!d.result) return null;
+    const r = d.result;
+    const tones = r.pitch?.tones.some((t) => t.expected !== 5) ?? false;
+
+    return card(
+      h('h2', { text: 'Your attempt' }),
+      h('div', { class: 'result' },
+        scoreRing(d.shown),
+        h('div', { class: 'result__text' },
+          h('p', { text: r.verdict }),
+          r.transcript
+            ? h('p', { class: 'muted small', text: `I heard: ${r.transcript}` })
+            : h('p', {
+                class: 'muted small',
+                text: d.skippedWords
+                  ? 'Word matching was skipped, so this attempt is graded on tones alone.'
+                  : 'No words were recognised. Get closer to the mic and try again.',
+              }),
+        ),
+      ),
+      meter('Words matched', r.contentScore),
+      tones ? meter('Tones', r.toneScore) : null,
+      r.missing.length ? h('p', { class: 'muted small', text: `Missed: ${r.missing.join(' ')}` }) : null,
+      r.extra.length ? h('p', { class: 'muted small', text: `Extra: ${r.extra.join(' ')}` }) : null,
+      r.pitch
+        ? frag(
+            h('h3', { text: 'Your pitch against the target' }),
+            pitchCanvas(r.pitch.contour, r.pitch.tones),
+            h('p', { class: 'muted small', text: r.pitch.summary }),
+          )
+        : null,
+      r.pitch && r.pitch.tips.length
+        ? h('ul', { class: 'bullets' }, ...r.pitch.tips.map((tip) => h('li', { text: tip })))
+        : null,
+    );
+  }
+
+  function drillCard(): DocumentFragment | null {
+    if (!drill) return null;
+    const d = drill;
+    const phrase = d.phrases[d.index];
+    const busy = d.phase !== 'idle';
+    const attempt = store.progress()[phrase.id];
+
+    const label =
+      d.phase === 'modelling'
+        ? 'Listening…'
+        : d.phase === 'listening'
+          ? '👂 Listening'
+          : d.phase === 'grading'
+            ? 'Marking…'
+            : '🎤 Say it back';
+
+    return frag(
+      card(
+        h('h2', { text: 'Practising with 小文' }),
+        h('p', {
+          class: 'muted small',
+          text: `Line ${d.index + 1} of ${d.phrases.length}. 小文 says it in English, then Chinese — copy the melody.`,
+        }),
+        phraseCard(phrase, {
+          showPinyin: app.settings.showPinyin,
+          showEnglish: app.settings.showEnglish,
+          toneScores: d.result?.pitch?.tones,
+          onSpeak: () => void modelPhrase(phrase),
+        }),
+        attempt
+          ? h('p', {
+              class: 'muted small',
+              text: `Best ${Math.round(attempt.best)}% · ${attempt.attempts} attempt${attempt.attempts === 1 ? '' : 's'}`,
+            })
+          : null,
+        h('div', { class: 'row' },
+          button(label, 'btn btn--mic', () => void drillTurn(), { disabled: busy }),
+          button('🔊 小文 says it', 'btn btn--ghost', () => void modelPhrase(phrase), { disabled: busy }),
+        ),
+        d.status ? h('div', { class: 'composer__status', text: d.status }) : null,
+      ),
+      drillResults(d),
+      h('div', { class: 'row row--end' },
+        button('◀ Previous', 'btn btn--ghost small-btn', () => stepDrill(-1), { disabled: busy }),
+        button('Next ▶', 'btn btn--ghost small-btn', () => stepDrill(1), { disabled: busy }),
+        button('Done', 'btn btn--ghost small-btn', () => closeDrill(), { disabled: busy }),
+      ),
+    );
   }
 
   function planCard(): HTMLElement | null {
@@ -265,7 +515,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     micIcon.textContent = view.icon;
     micLabel.textContent = phase === 'off' ? 'Start' : view.label;
     micBtn.className = `live__mic ${view.cls}`.trim();
-    micBtn.disabled = phase === 'thinking' || !MicRecorder.isSupported();
+    micBtn.disabled = phase === 'thinking' || !MicRecorder.isSupported() || drill !== null;
     endBtn.hidden = phase === 'off';
 
     statusEl.textContent = statusText();
@@ -275,7 +525,8 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
 
     paintTranscript();
     practiceEl.textContent = '';
-    const practice = practiceCard();
+    // A running activity takes the place of the suggestion card.
+    const practice = drill ? drillCard() : practiceCard();
     if (practice) practiceEl.append(practice);
     planEl.textContent = '';
     const plan = planCard();
@@ -306,6 +557,8 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
 
   function end(): void {
     session += 1;
+    drillSession += 1;
+    drill = null;
     phase = 'off';
     status = '';
     streaming = null;
@@ -359,12 +612,27 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     }
   }
 
-  async function speak(zh: string, mine: number): Promise<boolean> {
-    if (!zh.trim()) return mine === session;
+  /** Says a whole tutor turn out loud: English first, then the Chinese. */
+  async function speak(reply: TutorReply, mine: number): Promise<boolean> {
+    const en = reply.en.trim();
+    const zh = reply.zh.trim();
+    if (!en && !zh) return mine === session;
+
     phase = 'speaking';
     status = 'Speaking — tap the microphone to interrupt.';
     paint();
-    await tts.speak(zh, app.settings.speechRate);
+
+    if (en) {
+      status = '小文 is explaining in English.';
+      paint();
+      await tts.speak(en, app.settings.speechRate, { lang: 'en' });
+      if (mine !== session) return false;
+    }
+    if (zh) {
+      status = 'Now the Chinese — copy the melody.';
+      paint();
+      await tts.speak(zh, app.settings.speechRate, { lang: 'zh' });
+    }
     return mine === session;
   }
 
@@ -381,7 +649,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     lines.push({ kind: 'tutor', reply: OPENING });
     status = '小文 is saying hello.';
     paint();
-    if (!(await speak(OPENING.zh, mine))) return;
+    if (!(await speak(OPENING, mine))) return;
 
     while (mine === session) {
       const heard = await listenOnce(mine);
@@ -427,21 +695,32 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
 
       history.push({ role: 'assistant', content: raw });
       lines.push({ kind: 'tutor', reply });
-      handleSuggestion(reply.suggest);
+      handleSuggestion(reply);
       paint();
 
-      if (!(await speak(reply.zh, mine))) return;
+      if (!(await speak(reply, mine))) return;
       await delay(250);
     }
   }
 
-  function handleSuggestion(rawTopic: string | undefined): void {
-    const topic = (rawTopic ?? '').replace(/^[-–—\s]+|[-–—\s]+$/g, '').trim();
+  /**
+   * Turns the tutor's two closing lines into a concrete offer: the topic it
+   * names becomes a lesson (or written lines), and ACTIVITY becomes the wording
+   * of the activity itself.
+   */
+  function handleSuggestion(reply: TutorReply): void {
+    const trim = (value: string | undefined) => (value ?? '').replace(/^[-–—\s]+|[-–—\s]+$/g, '').trim();
+    const activity = trim(reply.activity);
+    const topic = trim(reply.suggest);
+
+    // Keep the latest activity on the current offer even when the topic repeats.
+    if (activity && suggestion) suggestion.activity = activity;
+
     if (topic.length < 3 || topic.toLowerCase() === lastTopic) return;
     lastTopic = topic.toLowerCase();
 
     const lesson = matchLessons(topic, 1)[0] ?? null;
-    suggestion = { topic, lesson, phrases: null, busy: false, failed: false };
+    suggestion = { topic, activity, lesson, phrases: null, busy: false, failed: false };
     if (lesson) store.recordSuggestion(lesson.id, topic);
   }
 
@@ -464,13 +743,16 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
   paint();
 
   const unsubscribe = subscribe(() => {
-    // Do not rebuild the page under an open microphone or a live generation.
+    // Do not rebuild the page under an open microphone, a live generation, or
+    // a drill that is mid-turn.
     if (phase === 'listening' || phase === 'thinking') return;
+    if (drill && drill.phase !== 'idle') return;
     paint();
   });
 
   return () => {
     session += 1;
+    drillSession += 1;
     unsubscribe();
     recorder.cancel();
     tts.cancel();

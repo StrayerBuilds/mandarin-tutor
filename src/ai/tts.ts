@@ -4,7 +4,8 @@
  * No network, no audio files to download: Android and iOS both ship a Mandarin
  * voice. Some Android phones need the Chinese voice data installed once in
  * Settings → Text-to-speech, so the app checks and tells the learner when the
- * voice is missing instead of silently doing nothing.
+ * voice is missing instead of silently doing nothing. An English voice is picked
+ * too, so 小文 can lead in English and then give the Chinese in a different voice.
  */
 export interface TtsStatus {
   available: boolean;
@@ -13,6 +14,10 @@ export interface TtsStatus {
 }
 
 const PREFERRED = /tingting|meijia|sinji|yaoyao|huihui|xiaoxiao|yunxi|普通话|中文|chinese|mandarin/i;
+const PREFERRED_EN = /samantha|serena|daniel|karen|moira|tessa|aria|jenny|zira|natural|google us english/i;
+
+/** Which half of a bilingual tutor is talking. */
+export type VoiceLang = 'zh' | 'en';
 
 function allVoices(): SpeechSynthesisVoice[] {
   try {
@@ -22,13 +27,20 @@ function allVoices(): SpeechSynthesisVoice[] {
   }
 }
 
-function pickVoice(): SpeechSynthesisVoice | null {
+function pickVoice(lang: VoiceLang = 'zh'): SpeechSynthesisVoice | null {
   const voices = allVoices();
-  const zh = voices.filter((v) => /^zh/i.test(v.lang) || /zh[-_]?(CN|Hans|SG)/i.test(v.lang));
-  if (zh.length === 0) return null;
-  const local = zh.filter((v) => v.localService);
-  const pool = local.length > 0 ? local : zh;
-  return pool.find((v) => PREFERRED.test(v.name)) ?? pool[0];
+  const wanted =
+    lang === 'zh'
+      ? voices.filter((v) => /^zh/i.test(v.lang) || /zh[-_]?(CN|Hans|SG)/i.test(v.lang))
+      : voices.filter((v) => /^en/i.test(v.lang));
+
+  // No English voice installed: the Mandarin one still reads English acceptably.
+  if (wanted.length === 0) return lang === 'zh' ? null : pickVoice('zh');
+
+  const local = wanted.filter((v) => v.localService);
+  const pool = local.length > 0 ? local : wanted;
+  const preferred = lang === 'zh' ? PREFERRED : PREFERRED_EN;
+  return pool.find((v) => preferred.test(v.name)) ?? pool[0];
 }
 
 export const tts = {
@@ -108,13 +120,15 @@ export const tts = {
     }
   },
 
-  speak(text: string, rate = 0.85, opts: { pitch?: number } = {}): Promise<void> {
+  /** @param opts.lang which half of the bilingual tutor is talking. */
+  speak(text: string, rate = 0.85, opts: { pitch?: number; lang?: VoiceLang } = {}): Promise<void> {
     return new Promise((resolve) => {
       if (!('speechSynthesis' in window) || !text.trim()) {
         resolve();
         return;
       }
-      const voice = pickVoice();
+      const lang = opts.lang ?? 'zh';
+      const voice = pickVoice(lang);
       if (!voice) {
         resolve();
         return;
@@ -128,7 +142,7 @@ export const tts = {
 
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.voice = voice;
-      utterance.lang = voice.lang || 'zh-CN';
+      utterance.lang = voice.lang || (lang === 'en' ? 'en-US' : 'zh-CN');
       utterance.rate = rate;
       utterance.pitch = opts.pitch ?? 1;
 
