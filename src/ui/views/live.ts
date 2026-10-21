@@ -14,7 +14,7 @@ import { h, button, card, frag } from '../dom';
 import { meter, notice, phraseCard, pitchCanvas, scoreRing } from '../components';
 import { parseTutorReply } from '../../content/prompts';
 import { LESSONS, matchLessons } from '../../content/lessons';
-import { transcribe, transcribeWithWebSpeech, webSpeechSupported } from '../../ai/asr';
+import { transcribe, transcribeWithWebSpeech, webSpeechSupported, isNoiseTranscript } from '../../ai/asr';
 import { MicRecorder, type Recording } from '../../ai/recorder';
 import { generatePhrases, streamReply } from '../../ai/tutor';
 import { tts } from '../../ai/tts';
@@ -56,15 +56,22 @@ interface Drill {
 }
 
 const OPENING: TutorReply = {
-  zh: '你好，我是小文。你想练习什么？',
-  pinyin: 'ni3 hao3 wo3 shi4 xiao3 wen2 ni3 xiang3 lian4 xi2 shen2 me5',
-  en: "Hi, I'm Xiaowen, your Chinese tutor. I'll say everything in English first, then in Chinese. What would you like to work on today?",
-  note: 'Answer in English or Chinese — I understand both.',
+  zh: '你好，我是小文。',
+  pinyin: 'ni3 hao3 wo3 shi4 xiao3 wen2',
+  en: "Hey, good to meet you — I'm Xiaowen. I'll say things in English first, then in Chinese. So, what's on your mind today?",
+  note: 'Talk to me in English or Chinese, whichever comes out — I understand both.',
   activity: 'Tell me what to teach you',
   raw: '',
 };
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * How long to wait after 小文 stops talking before opening the microphone. The
+ * speaker and the room keep ringing for a moment, and without this gap the tail
+ * of its own voice counts as the learner starting to speak.
+ */
+const SPEAKER_SETTLE_MS = 650;
 
 export function mount(container: HTMLElement, openLesson: (lessonId: string) => void): () => void {
   let phase: Phase = 'off';
@@ -190,7 +197,13 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     }
     for (const line of lines) {
       if (line.kind === 'learner') {
-        transcriptEl.append(h('div', { class: 'bubble bubble--user', text: line.text ?? '' }));
+        // Shown back so the learner can tell straight away whether they were heard.
+        transcriptEl.append(
+          h('div', { class: 'bubble bubble--user' },
+            h('div', { class: 'bubble__who', text: 'You said' }),
+            h('div', { text: line.text ?? '' }),
+          ),
+        );
       } else if (line.reply) {
         transcriptEl.append(bubbleFor(line.reply, true));
       }
@@ -333,6 +346,9 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     d.status = 'Listen — English first, then the Chinese.';
     paint();
     await modelPhrase(phrase);
+    if (mine !== drillSession) return;
+    // Let the speaker and the room go quiet before the microphone opens.
+    await delay(SPEAKER_SETTLE_MS);
     if (mine !== drillSession) return;
 
     d.phase = 'listening';
@@ -573,10 +589,16 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     status = 'Listening — speak in Chinese or English.';
     paint();
 
+    /** Drops silence, coughs and Whisper's invented credits. */
+    const usable = (text: string): string | null => {
+      const heard = text.trim();
+      return heard && !isNoiseTranscript(heard) ? heard : null;
+    };
+
     if (webSpeech()) {
       try {
         const text = await transcribeWithWebSpeech(12000);
-        return mine === session ? text.trim() || null : null;
+        return mine === session ? usable(text) : null;
       } catch {
         return null;
       }
@@ -601,8 +623,10 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       phase = 'thinking';
       status = 'Working out what you said…';
       paint();
-      const text = await transcribe(clip.audio);
-      return mine === session ? text.trim() || null : null;
+      // Auto: the learner talks to 小文 in either language, and pinning this to
+      // Chinese turns their English into nonsense characters.
+      const text = await transcribe(clip.audio, 'auto');
+      return mine === session ? usable(text) : null;
     } catch (err) {
       if (mine !== session) return null;
       phase = 'off';
@@ -699,7 +723,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       paint();
 
       if (!(await speak(reply, mine))) return;
-      await delay(250);
+      await delay(SPEAKER_SETTLE_MS);
     }
   }
 

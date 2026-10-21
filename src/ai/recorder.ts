@@ -24,6 +24,12 @@ export interface ListenOptions {
 const TARGET_RATE = 16000;
 /** Voice-activity frame. Short enough to feel instant, long enough to be cheap. */
 const FRAME_MS = 60;
+/**
+ * Loud frames in a row before we believe a person is talking. A hand tap, a
+ * door, a cough or a chair scrape spikes for a frame or two and then stops;
+ * a voice keeps going. 180 ms of sustained level is enough to tell them apart.
+ */
+const ONSET_FRAMES = 3;
 
 function rms(frame: Float32Array): number {
   let sum = 0;
@@ -153,8 +159,10 @@ export class MicRecorder {
   async listen(opts: ListenOptions = {}): Promise<Recording | null> {
     const {
       onLevel,
-      silenceMs = 1000,
-      minSpeechMs = 300,
+      silenceMs = 1200,
+      // Low enough that a one-syllable answer like 好 still counts; the onset
+      // check above is what keeps coughs and taps out.
+      minSpeechMs = 350,
       startTimeoutMs = 10000,
       maxMs = 20000,
     } = opts;
@@ -198,8 +206,13 @@ export class MicRecorder {
     const startedAt = performance.now();
     const calibratedUntil = startedAt + 250;
     let noise = 0.006;
+    /** Consecutive loud frames, used to wait out the onset of a real voice. */
+    let loudRun = 0;
     let speechAt = 0;
-    let lastLoudAt = 0;
+    /** Frames actually spent above the threshold, not the span from first to last. */
+    let voicedMs = 0;
+    /** Continuous quiet since the last loud frame, which is what ends a turn. */
+    let quietMs = 0;
 
     try {
       const spoke = await new Promise<boolean>((resolve) => {
@@ -229,18 +242,28 @@ export class MicRecorder {
             return;
           }
 
-          const threshold = Math.min(0.05, Math.max(0.008, noise * 2.2));
+          // Have to be clearly above the room before this counts as a voice.
+          const threshold = Math.min(0.06, Math.max(0.012, noise * 2.6));
+
           if (level > threshold) {
-            lastLoudAt = now;
-            if (speechAt === 0) speechAt = now;
+            loudRun += 1;
+            quietMs = 0;
+            if (speechAt === 0) {
+              // Ignore a burst that stops as fast as it started.
+              if (loudRun < ONSET_FRAMES) return;
+              speechAt = now - ONSET_FRAMES * FRAME_MS;
+            }
+            voicedMs += FRAME_MS;
           } else {
+            loudRun = 0;
             noise = noise * 0.97 + level * 0.03;
+            if (speechAt > 0) quietMs += FRAME_MS;
           }
 
-          const spokeEnough = speechAt > 0 && lastLoudAt - speechAt >= minSpeechMs;
-          if (spokeEnough && now - lastLoudAt >= silenceMs) settle(true);
+          const finished = speechAt > 0 && voicedMs >= minSpeechMs && quietMs >= silenceMs;
+          if (finished) settle(true);
           else if (this.endRequested) settle(speechAt > 0);
-          else if (now - startedAt >= maxMs) settle(spokeEnough);
+          else if (now - startedAt >= maxMs) settle(voicedMs >= minSpeechMs);
           else if (speechAt === 0 && now - startedAt >= startTimeoutMs) settle(false);
         }, FRAME_MS);
       });

@@ -785,6 +785,16 @@ button {
   align-self: flex-start;
 }
 
+/* Labels the learner's own turn, so it is obvious what the microphone caught. */
+.bubble__who {
+  margin-bottom: 4px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
 .bubble--streaming {
   opacity: 0.75;
   border-style: dashed;

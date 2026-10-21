@@ -93,11 +93,29 @@ export async function ensureAsr(
   }
 }
 
-export async function transcribe(audio: Float32Array): Promise<string> {
+/** Whisper is pinned to Chinese for practice clips; conversation lets it detect. */
+export type AsrLanguage = 'chinese' | 'auto';
+
+export async function transcribe(audio: Float32Array, language: AsrLanguage = 'chinese'): Promise<string> {
   if (!loaded) throw new Error('The speech model is still loading.');
-  const out = await loaded.fn(audio, { language: 'chinese', task: 'transcribe' });
+  // Practice clips are always Chinese, and pinning the language stops Whisper
+  // turning a half-heard syllable into an English word. A live conversation can
+  // be either language, so it is left to detect one.
+  const options = language === 'auto' ? { task: 'transcribe' } : { language, task: 'transcribe' };
+  const out = await loaded.fn(audio, options);
   const first = Array.isArray(out) ? out[0] : out;
   return (first?.text ?? '').trim();
+}
+
+/** Whisper writes these into silence; they are its credits, not the learner. */
+const INVENTED = /(字幕|订阅|点赞|观看|amara\.org|thanks? for watching|please subscribe)/i;
+
+/** True when a transcript is silence, punctuation, or a subtitle hallucination. */
+export function isNoiseTranscript(text: string): boolean {
+  if (text.replace(/[\s.。，,、！!？?…~～\-–—]/g, '').length === 0) return true;
+  if (INVENTED.test(text)) return true;
+  // A single bracketed marker like "(music)" or "[BLANK_AUDIO]".
+  return /^\s*[\[(][^\])]*[\])]\s*$/.test(text);
 }
 
 /* ------------------------------------------------------------------ *
