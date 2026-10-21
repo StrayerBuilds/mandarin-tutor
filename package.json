@@ -1,0 +1,24 @@
+{
+  "name": "zhongwen-tutor",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Offline Chinese speaking tutor that runs entirely on your phone (WebGPU + WASM). No servers, no API tokens.",
+  "scripts": {
+    "predev": "node scripts/copy-ort.mjs",
+    "dev": "vite --host",
+    "prebuild": "node scripts/copy-ort.mjs",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview --host",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^3.8.1",
+    "@mlc-ai/web-llm": "^0.2.86"
+  },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.52",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11"
+  }
+}
