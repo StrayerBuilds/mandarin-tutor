@@ -16,8 +16,13 @@ import type { Phrase } from '../../types';
 
 type Phase = 'idle' | 'preparing' | 'recording' | 'working';
 
-export function mount(container: HTMLElement): () => void {
-  let lessonIndex = 0;
+export interface ShadowOptions {
+  /** Lesson to open straight away — used when the live tutor suggests one. */
+  lessonId?: string;
+}
+
+export function mount(container: HTMLElement, opts: ShadowOptions = {}): () => void {
+  let lessonIndex = Math.max(0, LESSONS.findIndex((l) => l.id === opts.lessonId));
   let phraseIndex = 0;
   let result: ShadowResult | null = null;
   /** True when the words could not be checked, so the grade falls back to tones. */

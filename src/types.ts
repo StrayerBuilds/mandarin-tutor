@@ -40,6 +40,8 @@ export interface TutorReply {
   pinyin: string;
   en: string;
   note: string;
+  /** Topic the tutor wants the learner to practise next, when it names one. */
+  suggest?: string;
   raw: string;
 }
 

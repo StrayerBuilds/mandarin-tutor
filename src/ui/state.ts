@@ -8,7 +8,7 @@ import { isModelCached, llm, resolveModelId } from '../ai/llm';
 import { tts, type TtsStatus } from '../ai/tts';
 import { store, type Settings } from '../store';
 
-export type TabId = 'home' | 'chat' | 'shadow' | 'tones' | 'settings';
+export type TabId = 'home' | 'chat' | 'shadow' | 'tones' | 'live' | 'settings';
 
 export interface StageStatus {
   state: 'idle' | 'loading' | 'ready' | 'error';

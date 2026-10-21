@@ -4,6 +4,7 @@ const SETTINGS_KEY = 'zhongwen.settings.v1';
 const PROGRESS_KEY = 'zhongwen.progress.v1';
 const TONE_KEY = 'zhongwen.tones.v1';
 const CHAT_KEY = 'zhongwen.chat.v1';
+const PLAN_KEY = 'zhongwen.plan.v1';
 
 export interface Settings {
   /** Which Qwen2.5 checkpoint to run. Resolved against WebLLM's built-in list. */
@@ -49,6 +50,15 @@ export interface ToneDrillStat {
 }
 
 export type ToneStats = Record<string, ToneDrillStat>;
+
+/** Lessons the live tutor has pointed at, newest first when sorted by `last`. */
+export interface PlanItem {
+  topic: string;
+  count: number;
+  last: number;
+}
+
+export type PlanMap = Record<string, PlanItem>;
 
 function read<T>(key: string, fallback: T): T {
   try {
@@ -121,12 +131,25 @@ export const store = {
     write(CHAT_KEY, messages.slice(-40));
   },
 
+  /** What the live tutor has decided this learner should work on. */
+  plan(): PlanMap {
+    return read<PlanMap>(PLAN_KEY, {});
+  },
+
+  recordSuggestion(lessonId: string, topic: string): void {
+    const all = this.plan();
+    const prev = all[lessonId] ?? { topic, count: 0, last: 0 };
+    all[lessonId] = { topic, count: prev.count + 1, last: Date.now() };
+    write(PLAN_KEY, all);
+  },
+
   resetAll(): void {
     try {
       localStorage.removeItem(SETTINGS_KEY);
       localStorage.removeItem(PROGRESS_KEY);
       localStorage.removeItem(TONE_KEY);
       localStorage.removeItem(CHAT_KEY);
+      localStorage.removeItem(PLAN_KEY);
     } catch {
       // ignore
     }

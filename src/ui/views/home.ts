@@ -95,6 +95,7 @@ export function mount(container: HTMLElement, go: (tab: TabId) => void): () => v
       h('p', { class: 'view__sub', text: 'Speak Mandarin with a tutor that lives on your phone.' }),
 
       h('div', { class: 'tiles' },
+        modeButton('live', 'Live', 'Talk out loud with 小文 — it answers and suggests what to practise next.', 'tile--live'),
         modeButton('shadow', 'Shadowing', 'Hear a line, say it back, get graded on words and tones.'),
         modeButton('tones', 'Tone trainer', 'Drill mā má mǎ mà until the four tones are obvious.'),
         modeButton('chat', 'Conversation', 'Chat or roleplay in Chinese, corrected as you go.'),

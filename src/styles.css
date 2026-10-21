@@ -882,6 +882,139 @@ button {
   color: var(--muted);
 }
 
+/* ---------- live conversation ---------- */
+
+.live {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  margin: 6px 0 14px;
+}
+
+.live__mic {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  width: 148px;
+  height: 148px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  transition: border-color 0.2s ease, background 0.2s ease, transform 0.1s ease;
+}
+
+.live__mic:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.live__mic:disabled {
+  opacity: 0.6;
+}
+
+.live__mic--on {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.live__mic--listening {
+  border-color: var(--good);
+  box-shadow: 0 0 0 6px rgba(87, 217, 163, 0.12);
+  animation: live-pulse 1.6s ease-in-out infinite;
+}
+
+.live__mic--speaking {
+  border-color: var(--weak);
+}
+
+.live__icon {
+  font-size: 2.6rem;
+  line-height: 1;
+}
+
+.live__label {
+  font-size: 0.86rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.live__level {
+  width: 148px;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.live__level i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--good);
+  transition: width 0.08s linear;
+}
+
+.live__controls {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 6px;
+}
+
+.live__controls:has(button[hidden]) {
+  display: none;
+}
+
+@keyframes live-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 6px rgba(87, 217, 163, 0.12);
+  }
+  50% {
+    box-shadow: 0 0 0 12px rgba(87, 217, 163, 0.05);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live__mic--listening {
+    animation: none;
+  }
+}
+
+.plan {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+
+.plan li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-top: 1px solid var(--line);
+}
+
+.plan__title {
+  display: block;
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
+.plan__topic {
+  display: block;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.tile--live {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
 @media (min-width: 620px) {
   .app__main {
     padding-left: 20px;

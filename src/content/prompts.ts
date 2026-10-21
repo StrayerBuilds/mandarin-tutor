@@ -8,7 +8,7 @@
  */
 import type { Phrase, TutorReply } from '../types';
 
-export type TutorMode = 'chat' | 'scenario' | 'explain';
+export type TutorMode = 'chat' | 'scenario' | 'explain' | 'live';
 
 export interface Scenario {
   id: string;
@@ -43,6 +43,28 @@ Hard rules:
 - If the learner wrote something incorrect, put the corrected version in ZH and explain the fix in NOTE.
 `.trim();
 
+/**
+ * Spoken turns need a different shape: the ZH line is read aloud by the phone,
+ * and a fifth line tells the app what to offer as practice next.
+ */
+const SPOKEN_RULES = `
+Always reply in exactly this five-line format, in this order, with nothing before or after:
+
+ZH: <your Chinese, characters only — this line is spoken aloud exactly as written>
+PY: <pinyin with tone numbers, one syllable per Chinese character, space separated, e.g. ni3 hao3>
+EN: <natural English translation of the ZH line>
+NOTE: <one short tip or answer in English, one sentence>
+SUGGEST: <the English topic to practise next, three or four words, or - if nothing fits>
+
+Hard rules:
+- ZH is read aloud by a machine, so use plain characters: no pinyin, no brackets, no emoji, no markdown.
+- One or two short sentences, then a question. This is a conversation, not a lecture.
+- PY must have exactly one syllable per character in ZH.
+- Never merge lines. Never add other labels.
+- Stay at HSK 1-2 level.
+- SUGGEST names what the learner just showed interest in — a topic, never a sentence.
+`.trim();
+
 export function systemPrompt(mode: TutorMode, scenario?: Scenario): string {
   const persona =
     "You are 小文, a patient Mandarin tutor for an English-speaking beginner. You correct gently and never lecture.";
@@ -62,6 +84,21 @@ ${FORMAT_RULES}`;
 The learner is asking about how Chinese works. Answer their question directly in the EN line, give a concrete Chinese example in ZH, and use NOTE for a memory hook or a common mistake to avoid.
 
 ${FORMAT_RULES}`;
+  }
+
+  if (mode === 'live') {
+    return `${persona}
+
+You are on a live voice call with the learner. Your ZH line is spoken aloud, so it must sound like natural speech and stay short.
+
+Your job, in order of priority:
+1. If the learner asks how to say something, what a word means, or how Chinese works, answer the question plainly in the EN line and give the Chinese in the ZH line.
+2. If the learner says what they want to learn or do (food, travel, work, meeting people…), teach them the two or three sentences they need for it, and name that topic in SUGGEST.
+3. Otherwise keep a warm, simple conversation going about everyday things.
+
+Be encouraging and human. React to what the learner actually said before teaching. If they say something wrong, say the corrected version in ZH and explain briefly in NOTE.
+
+${SPOKEN_RULES}`;
   }
 
   return `${persona}
@@ -85,12 +122,18 @@ const LABEL_MAP: Record<string, keyof TutorReply> = {
   notes: 'note',
   tip: 'note',
   '提示': 'note',
+  suggest: 'suggest',
+  suggestion: 'suggest',
+  practice: 'suggest',
+  practise: 'suggest',
+  topic: 'suggest',
+  '建议': 'suggest',
 };
 
-/** Pulls ZH / PY / EN / NOTE out of a model reply, tolerating markdown and Chinese labels. */
+/** Pulls ZH / PY / EN / NOTE / SUGGEST out of a model reply, tolerating markdown and Chinese labels. */
 export function parseTutorReply(raw: string): TutorReply {
-  const reply: TutorReply = { zh: '', pinyin: '', en: '', note: '', raw };
-  const lineRe = /^\s*(?:[-*#>\s]|\*\*)*\s*(ZH|PY|EN|NOTE|NOTES|TIP|中文|拼音|英文|提示)\s*(?:\*\*)?\s*[:：]\s*(.*)$/i;
+  const reply: TutorReply = { zh: '', pinyin: '', en: '', note: '', suggest: '', raw };
+  const lineRe = /^\s*(?:[-*#>\s]|\*\*)*\s*(ZH|PY|EN|NOTE|NOTES|TIP|SUGGEST|SUGGESTION|PRACTICE|PRACTISE|TOPIC|中文|拼音|英文|提示|建议)\s*(?:\*\*)?\s*[:：]\s*(.*)$/i;
 
   const lines = raw.split(/\r?\n/);
   let current: keyof TutorReply | null = null;
@@ -106,13 +149,15 @@ export function parseTutorReply(raw: string): TutorReply {
       }
     }
     if (current && line.trim()) {
-      reply[current] = `${reply[current]} ${line.trim()}`.trim();
+      reply[current] = `${reply[current] ?? ''} ${line.trim()}`.trim();
     }
   }
 
   // Model ignored the format: show what it wrote rather than an empty card.
   if (!reply.zh) {
-    reply.zh = raw.replace(/^\s*(ZH|PY|EN|NOTE)\s*[:：].*$/gim, '').trim() || raw.trim();
+    reply.zh = raw
+      .replace(/^\s*(ZH|PY|EN|NOTE|SUGGEST|SUGGESTION|PRACTICE|TOPIC)\s*[:：].*$/gim, '')
+      .trim() || raw.trim();
   }
   // Some models separate the pinyin with hyphens or slashes by syllable.
   reply.pinyin = reply.pinyin.replace(/[-–/]/g, ' ').replace(/\s+/g, ' ').trim();

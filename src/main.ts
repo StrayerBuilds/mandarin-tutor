@@ -12,10 +12,12 @@ import { mount as mountHome } from './ui/views/home';
 import { mount as mountChat } from './ui/views/chat';
 import { mount as mountShadow } from './ui/views/shadow';
 import { mount as mountTones } from './ui/views/tones';
+import { mount as mountLive } from './ui/views/live';
 import { mount as mountSettings } from './ui/views/settings';
 
 const TABS: { id: TabId; icon: string; label: string }[] = [
   { id: 'home', icon: '🏠', label: 'Home' },
+  { id: 'live', icon: '🎙', label: 'Live' },
   { id: 'shadow', icon: '🗣', label: 'Shadow' },
   { id: 'tones', icon: '🎵', label: 'Tones' },
   { id: 'chat', icon: '💬', label: 'Chat' },
@@ -32,15 +34,27 @@ root.textContent = '';
 root.append(h('div', { class: 'app' }, main, nav));
 
 let disposeView: (() => void) | null = null;
+/** Set when a lesson should be open in Shadowing on the next visit. */
+let pendingLesson: string | null = null;
+
+function openLesson(lessonId: string): void {
+  pendingLesson = lessonId;
+  show('shadow');
+}
 
 function mountView(tab: TabId, container: HTMLElement): () => void {
   switch (tab) {
-    case 'shadow':
-      return mountShadow(container);
+    case 'shadow': {
+      const lessonId = pendingLesson ?? undefined;
+      pendingLesson = null;
+      return mountShadow(container, { lessonId });
+    }
     case 'tones':
       return mountTones(container);
     case 'chat':
       return mountChat(container);
+    case 'live':
+      return mountLive(container, openLesson);
     case 'settings':
       return mountSettings(container);
     case 'home':

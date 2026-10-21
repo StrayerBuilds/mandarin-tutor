@@ -113,6 +113,45 @@ export function lessonOf(phraseId: string): Lesson | undefined {
   return LESSONS.find((l) => l.phrases.some((p) => p.id === phraseId));
 }
 
+/** Words that carry no topic, so they must not decide which lesson to open. */
+const STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'you', 'your', 'our', 'about', 'into', 'how', 'what',
+  'this', 'that', 'these', 'those', 'want', 'wants', 'like', 'need', 'learn',
+  'learning', 'practice', 'practise', 'practicing', 'talk', 'talking', 'speak',
+  'speaking', 'say', 'saying', 'ask', 'asking', 'tell', 'give', 'get', 'more',
+  'some', 'any', 'can', 'could', 'should', 'would', 'chinese', 'mandarin',
+  'lesson', 'lessons', 'word', 'words', 'phrase', 'phrases', 'sentence',
+  'sentences', 'next', 'round', 'basic', 'basics', 'again', 'also', 'from',
+]);
+
+/**
+ * Turns a topic the tutor suggested ("ordering coffee") into the lessons that
+ * actually cover it. Returns nothing when no lesson fits, which is the caller's
+ * cue to offer freshly written lines instead.
+ */
+export function matchLessons(topic: string, limit = 1): Lesson[] {
+  const words = topic
+    .toLowerCase()
+    .split(/[^a-z]+/)
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w));
+  if (words.length === 0) return [];
+
+  return LESSONS.map((lesson) => {
+    const title = lesson.title.toLowerCase();
+    const body = lesson.phrases.map((p) => p.en.toLowerCase()).join(' ');
+    let score = 0;
+    for (const word of words) {
+      if (title.includes(word)) score += 3;
+      else if (body.includes(word)) score += 1;
+    }
+    return { lesson, score };
+  })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((entry) => entry.lesson);
+}
+
 /**
  * Authoring guard: every Chinese character needs exactly one pinyin syllable, or
  * the tone grader silently scores the wrong syllables. Throws in dev, warns in prod.
