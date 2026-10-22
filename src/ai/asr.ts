@@ -93,14 +93,17 @@ export async function ensureAsr(
   }
 }
 
-/** Whisper is pinned to Chinese for practice clips; conversation lets it detect. */
-export type AsrLanguage = 'chinese' | 'auto';
+/**
+ * Always state the expected language. Left unset, the model falls back to
+ * English anyway, but relying on that default is how the conversation ended up
+ * transcribing English speech as Chinese characters.
+ */
+export type AsrLanguage = 'chinese' | 'english' | 'auto';
 
 export async function transcribe(audio: Float32Array, language: AsrLanguage = 'chinese'): Promise<string> {
   if (!loaded) throw new Error('The speech model is still loading.');
   // Practice clips are always Chinese, and pinning the language stops Whisper
-  // turning a half-heard syllable into an English word. A live conversation can
-  // be either language, so it is left to detect one.
+  // turning a half-heard syllable into an English word.
   const options = language === 'auto' ? { task: 'transcribe' } : { language, task: 'transcribe' };
   const out = await loaded.fn(audio, options);
   const first = Array.isArray(out) ? out[0] : out;
@@ -108,12 +111,18 @@ export async function transcribe(audio: Float32Array, language: AsrLanguage = 'c
 }
 
 /** Whisper writes these into silence; they are its credits, not the learner. */
-const INVENTED = /(字幕|订阅|点赞|观看|amara\.org|thanks? for watching|please subscribe)/i;
+const INVENTED =
+  /(字幕|订阅|点赞|观看|amara\.org|thanks? for watching|please subscribe|subtitles? by|subscribe)/i;
+
+/** The English phrases Whisper invents when it is handed silence. */
+const INVENTED_EN = /^(?:thank you\.?|thanks\.?|you|bye\.?|okay\.?|hmm+|uh+|\.+|♪+)$/i;
 
 /** True when a transcript is silence, punctuation, or a subtitle hallucination. */
 export function isNoiseTranscript(text: string): boolean {
-  if (text.replace(/[\s.。，,、！!？?…~～\-–—]/g, '').length === 0) return true;
+  const bare = text.replace(/[\s.。，,、！!？?…~～\-–—♪♫]/g, '');
+  if (bare.length === 0) return true;
   if (INVENTED.test(text)) return true;
+  if (INVENTED_EN.test(text.trim())) return true;
   // A single bracketed marker like "(music)" or "[BLANK_AUDIO]".
   return /^\s*[\[(][^\])]*[\])]\s*$/.test(text);
 }
@@ -165,13 +174,18 @@ export function webSpeechSupported(): boolean {
   return recognitionCtor() !== null;
 }
 
-export function transcribeWithWebSpeech(timeoutMs = 8000): Promise<string> {
+/**
+ * @param lang BCP-47 tag the recogniser should expect. It cannot switch by
+ *   itself, so the caller has to say: Chinese for a practice clip, English for
+ *   the live conversation.
+ */
+export function transcribeWithWebSpeech(timeoutMs = 8000, lang = 'zh-CN'): Promise<string> {
   const Ctor = recognitionCtor();
   if (!Ctor) return Promise.reject(new Error('This browser has no built-in speech recognition.'));
 
   return new Promise<string>((resolve, reject) => {
     const rec = new Ctor();
-    rec.lang = 'zh-CN';
+    rec.lang = lang;
     rec.continuous = false;
     rec.interimResults = false;
     rec.maxAlternatives = 1;

@@ -20,7 +20,7 @@ import { generatePhrases, streamReply } from '../../ai/tutor';
 import { tts } from '../../ai/tts';
 import { scoreAttempt, type ShadowResult } from '../../nlp/score';
 import { store } from '../../store';
-import { app, ensureSpeech, loadModel, subscribe } from '../state';
+import { app, ensureSpeech, loadModel, subscribe, unloadModel } from '../state';
 import type { ChatMessage, Lesson, Phrase, TutorReply } from '../../types';
 
 type Phase = 'off' | 'listening' | 'thinking' | 'speaking';
@@ -82,6 +82,8 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
   let suggestion: Suggestion | null = null;
   let drill: Drill | null = null;
   let lastTopic = '';
+  /** Why the last turn produced no answer, kept on screen until it works again. */
+  let replyError = '';
   /** Bumped on every end/interrupt so in-flight turns know they are stale. */
   let session = 0;
   /** Same idea for the drill, which runs while the conversation is stopped. */
@@ -137,6 +139,16 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
 
   function notices(): Node[] {
     const out: Node[] = [];
+    if (replyError) {
+      // Never hide this. A turn that produces nothing is otherwise impossible to
+      // diagnose from the outside.
+      out.push(
+        frag(
+          notice(`小文 could not answer: ${replyError}`, 'error'),
+          button('Reload the tutor model', 'btn small-btn', () => void reloadModel()),
+        ),
+      );
+    }
     if (!MicRecorder.isSupported()) {
       out.push(notice('This browser cannot record audio, so live conversation is unavailable here.', 'warn'));
     }
@@ -159,6 +171,18 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       );
     }
     return out;
+  }
+
+  /** A failed generation usually means the model's worker died. Reloading fixes it. */
+  async function reloadModel(): Promise<void> {
+    replyError = '';
+    unloadModel();
+    paint();
+    await loadModel();
+    if (app.model.state === 'error') {
+      replyError = app.model.error ?? 'The tutor model could not be reloaded.';
+    }
+    paint();
   }
 
   /** English first, then the Chinese — so a beginner hears the meaning first. */
@@ -190,7 +214,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     if (lines.length === 0) {
       transcriptEl.append(
         h('div', { class: 'empty' },
-          h('p', { class: 'muted', text: 'Tap the microphone and start talking. Chinese or English, either is fine.' }),
+          h('p', { class: 'muted', text: 'Tap the microphone and start talking. Say it in English — 小文 answers in English, then in Chinese. Your words are shown back so you can see what was heard.' }),
         ),
       );
       return;
@@ -586,7 +610,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
   /** Waits for one spoken turn. Returns null when nothing usable was heard. */
   async function listenOnce(mine: number): Promise<string | null> {
     phase = 'listening';
-    status = 'Listening — speak in Chinese or English.';
+    status = 'Listening — say it in English. 小文 answers in English, then gives the Chinese.';
     paint();
 
     /** Drops silence, coughs and Whisper's invented credits. */
@@ -597,7 +621,8 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
 
     if (webSpeech()) {
       try {
-        const text = await transcribeWithWebSpeech(12000);
+        // The learner is a beginner, so they are speaking English to us.
+        const text = await transcribeWithWebSpeech(12000, 'en-US');
         return mine === session ? usable(text) : null;
       } catch {
         return null;
@@ -614,7 +639,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       return null;
     }
 
-    status = 'Listening — speak in Chinese or English.';
+    status = 'Listening — say it in English. 小文 answers in English, then gives the Chinese.';
     paint();
 
     try {
@@ -623,9 +648,9 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       phase = 'thinking';
       status = 'Working out what you said…';
       paint();
-      // Auto: the learner talks to 小文 in either language, and pinning this to
-      // Chinese turns their English into nonsense characters.
-      const text = await transcribe(clip.audio, 'auto');
+      // English, not the Chinese pin: the learner talks to 小文 in English, and
+      // Chinese recognition turns every English sentence into characters.
+      const text = await transcribe(clip.audio, 'english');
       return mine === session ? usable(text) : null;
     } catch (err) {
       if (mine !== session) return null;
@@ -696,6 +721,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       paint();
 
       let raw = '';
+      let failure = '';
       try {
         for await (const piece of streamReply(history, 'live')) {
           if (mine !== session) return;
@@ -705,17 +731,21 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
         }
       } catch (err) {
         if (mine !== session) return;
-        status = `The reply failed: ${(err as Error).message}`;
+        failure = (err as Error).message;
       }
       streaming = null;
 
       const reply = parseTutorReply(raw);
-      if (!reply.zh) {
-        status = 'Nothing came back that time — say that again.';
+      // Show the real reason. Reporting this as a vague "nothing came back"
+      // hides whether the model threw, died, or simply returned nothing.
+      if (!reply.zh && !reply.en) {
+        replyError = failure || 'the model returned an empty reply.';
+        status = `小文 could not answer: ${replyError}`;
         paint();
-        await delay(400);
+        await delay(600);
         continue;
       }
+      replyError = '';
 
       history.push({ role: 'assistant', content: raw });
       lines.push({ kind: 'tutor', reply });

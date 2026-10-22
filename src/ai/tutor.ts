@@ -19,6 +19,12 @@ export function modelLabel(): string {
   return llm.ready ? (llm.modelId ?? 'on-device model') : 'scripted tutor (no WebGPU)';
 }
 
+/** The scripted tutor's answer, in the same labelled format the views parse. */
+function scriptedLine(input: string): string {
+  const reply = offlineReply(input);
+  return `EN: ${reply.en}\nZH: ${reply.zh}\nPY: ${reply.pinyin}\nNOTE: ${reply.note}`;
+}
+
 export async function* streamReply(
   history: ChatMessage[],
   mode: TutorMode,
@@ -27,8 +33,7 @@ export async function* streamReply(
   const lastUser = [...history].reverse().find((m) => m.role === 'user')?.content ?? '';
 
   if (!llm.ready) {
-    const reply = offlineReply(lastUser);
-    yield `ZH: ${reply.zh}\nPY: ${reply.pinyin}\nEN: ${reply.en}\nNOTE: ${reply.note}`;
+    yield scriptedLine(lastUser);
     return;
   }
 
@@ -37,7 +42,15 @@ export async function* streamReply(
     ...trimHistory(history, MAX_HISTORY),
   ];
 
-  yield* llm.stream(messages, mode === 'explain' ? 0.4 : 0.75, 400);
+  let out = '';
+  for await (const piece of llm.stream(messages, mode === 'explain' ? 0.4 : 0.75, 400)) {
+    out += piece;
+    yield piece;
+  }
+
+  // A small model on a phone sometimes comes back with nothing at all. An empty
+  // turn reads as "the tutor froze", so say something useful instead.
+  if (!out.trim()) yield scriptedLine(lastUser);
 }
 
 /** Extra practice sentences, tailored to a topic when the model is available. */
