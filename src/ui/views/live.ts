@@ -67,6 +67,23 @@ const OPENING: TutorReply = {
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * The real reason a turn produced nothing.
+ *
+ * A model worker that the phone has killed rejects with an event or a bare
+ * object, not an Error, so `(err as Error).message` is empty. Reporting that
+ * empty string is what turned a crashed model into the vague "empty reply".
+ */
+function describeError(err: unknown): string {
+  if (err instanceof Error && err.message) return err.message;
+  const loose = err as { message?: string; type?: string; error?: unknown };
+  if (loose?.error instanceof Error && loose.error.message) return loose.error.message;
+  if (typeof loose?.message === 'string' && loose.message) return loose.message;
+  if (typeof loose?.type === 'string' && loose.type) return `the tutor model stopped (${loose.type})`;
+  const text = String(err ?? '').trim();
+  return text && text !== '[object Object]' ? text : 'the tutor model stopped responding';
+}
+
+/**
  * How long to wait after 小文 stops talking before opening the microphone. The
  * speaker and the room keep ringing for a moment, and without this gap the tail
  * of its own voice counts as the learner starting to speak.
@@ -84,6 +101,8 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
   let lastTopic = '';
   /** Why the last turn produced no answer, kept on screen until it works again. */
   let replyError = '';
+  /** Turns in a row that ended without an answer. */
+  let emptyTurns = 0;
   /** Bumped on every end/interrupt so in-flight turns know they are stale. */
   let session = 0;
   /** Same idea for the drill, which runs while the conversation is stopped. */
@@ -694,6 +713,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
     suggestion = null;
     lastTopic = '';
     streaming = null;
+    emptyTurns = 0;
 
     lines.push({ kind: 'tutor', reply: OPENING });
     status = '小文 is saying hello.';
@@ -731,7 +751,7 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
         }
       } catch (err) {
         if (mine !== session) return;
-        failure = (err as Error).message;
+        failure = describeError(err);
       }
       streaming = null;
 
@@ -741,11 +761,22 @@ export function mount(container: HTMLElement, openLesson: (lessonId: string) => 
       if (!reply.zh && !reply.en) {
         replyError = failure || 'the model returned an empty reply.';
         status = `小文 could not answer: ${replyError}`;
+        emptyTurns += 1;
+        // One silent turn can be a hiccup, and the next one falls back to the
+        // scripted tutor. Two in a row means answering is not going to work, and
+        // re-opening the microphone would just loop for ever.
+        if (emptyTurns >= 2) {
+          phase = 'off';
+          status = 'I stopped the call because 小文 cannot answer right now. Reload the tutor model from the notice above, then tap Start.';
+          paint();
+          return;
+        }
         paint();
         await delay(600);
         continue;
       }
       replyError = '';
+      emptyTurns = 0;
 
       history.push({ role: 'assistant', content: raw });
       lines.push({ kind: 'tutor', reply });

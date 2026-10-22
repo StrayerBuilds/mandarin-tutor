@@ -106,18 +106,28 @@ export class LocalLLM {
 
   async *stream(messages: ChatMessage[], temperature = 0.7, maxTokens = 400): AsyncGenerator<string> {
     if (!this.engine) throw new Error('The model is not loaded yet.');
-    const chunks = (await this.engine.chat.completions.create({
-      // Structurally identical to OpenAI's message shape; the cast only avoids
-      // depending on WebLLM's exported union type name.
-      messages: messages as never,
-      stream: true,
-      temperature,
-      max_tokens: maxTokens,
-    })) as unknown as StreamShape;
+    try {
+      const chunks = (await this.engine.chat.completions.create({
+        // Structurally identical to OpenAI's message shape; the cast only avoids
+        // depending on WebLLM's exported union type name.
+        messages: messages as never,
+        stream: true,
+        temperature,
+        max_tokens: maxTokens,
+      })) as unknown as StreamShape;
 
-    for await (const chunk of chunks) {
-      const delta = chunk.choices?.[0]?.delta?.content;
-      if (delta) yield delta;
+      for await (const chunk of chunks) {
+        const delta = chunk.choices?.[0]?.delta?.content;
+        if (delta) yield delta;
+      }
+    } catch (err) {
+      // Once a generation fails the engine's worker is usually gone, and every
+      // later turn fails the same way — the conversation then just alternates
+      // between listening and an error. Dropping the dead engine here makes
+      // `ready` false, so the next turn falls back to the scripted tutor and the
+      // learner still gets an answer.
+      this.dispose();
+      throw err;
     }
   }
 
@@ -138,7 +148,8 @@ export class LocalLLM {
 
   dispose(): void {
     try {
-      this.engine?.unload();
+      // `unload` is async and may itself reject when the worker is already dead.
+      void this.engine?.unload().catch(() => {});
     } catch {
       // Already gone.
     }
